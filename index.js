@@ -517,15 +517,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.login(MY_BOT_TOKEN);
-  } catch (err) {
-    console.error(err);
-    const msg = eph('Something went wrong, please try again.');
-    if (interaction.deferred || interaction.replied) interaction.followUp(msg).catch(() => {});
-    else interaction.reply(msg).catch(() => {});
-  }
-});
 
-client.login(MY_BOT_TOKEN);
 // Keeps Render's Web Service happy by opening a port
 const http = require('http');
 http
