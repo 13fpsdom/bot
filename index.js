@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
   EmbedBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -15,7 +16,17 @@ const {
   MessageFlags,
 } = require('discord.js');
 
-const { DISCORD_TOKEN, GUILD_ID, STAFF_ROLE_ID, TICKET_CATEGORY_ID } = process.env;
+const { MY_BOT_TOKEN, GUILD_ID, STAFF_ROLE_ID, TICKET_CATEGORY_ID } = process.env;
+
+if (!MY_BOT_TOKEN) {
+  console.error('Missing MY_BOT_TOKEN environment variable. Set it in your host\'s Environment settings or in your .env file.');
+  process.exit(1);
+}
+
+if (!GUILD_ID) {
+  console.error('Missing GUILD_ID environment variable. Set it to your server ID in your host\'s Environment settings or in your .env file.');
+  process.exit(1);
+}
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -70,15 +81,22 @@ const TICKET_TYPES = {
 // ---------------------------------------------------------------
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  const guild = await client.guilds.fetch(GUILD_ID);
-  await guild.commands.set([
-    new SlashCommandBuilder()
-      .setName('ticketpanel')
-      .setDescription('Post the ticket panel in this channel')
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-      .toJSON(),
-  ]);
-  console.log('Slash commands registered.');
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID.trim());
+    await guild.commands.set([
+      new SlashCommandBuilder()
+        .setName('ticketpanel')
+        .setDescription('Post the ticket panel in this channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .toJSON(),
+    ]);
+    console.log('Slash commands registered.');
+  } catch (err) {
+    console.error(
+      'Could not register slash commands. Check that GUILD_ID is correct and the bot has been invited to that server.',
+      err
+    );
+  }
 });
 
 // ---------------------------------------------------------------
@@ -91,7 +109,7 @@ client.on('interactionCreate', async (interaction) => {
       const embed = new EmbedBuilder()
         .setTitle('🎫 Open a Ticket')
         .setDescription(
-          'Click a button below to open a ticket.\n\n' +
+          'Use the dropdown below to open a ticket.\n\n' +
             Object.values(TICKET_TYPES)
               .map((t) => `${t.emoji} **${t.label}**`)
               .join('\n')
@@ -99,22 +117,25 @@ client.on('interactionCreate', async (interaction) => {
         .setColor(0x5865f2);
 
       const row = new ActionRowBuilder().addComponents(
-        Object.entries(TICKET_TYPES).map(([key, t]) =>
-          new ButtonBuilder()
-            .setCustomId(`ticket_open:${key}`)
-            .setLabel(t.label)
-            .setEmoji(t.emoji)
-            .setStyle(t.style)
-        )
+        new StringSelectMenuBuilder()
+          .setCustomId('ticket_select')
+          .setPlaceholder('Select a ticket type...')
+          .addOptions(
+            Object.entries(TICKET_TYPES).map(([key, t]) => ({
+              label: t.label,
+              value: key,
+              emoji: t.emoji,
+            }))
+          )
       );
 
       await interaction.channel.send({ embeds: [embed], components: [row] });
       return interaction.reply({ content: 'Panel posted ✅', flags: MessageFlags.Ephemeral });
     }
 
-    // Button: open ticket -> show modal
-    if (interaction.isButton() && interaction.customId.startsWith('ticket_open:')) {
-      const key = interaction.customId.split(':')[1];
+    // Dropdown: choose ticket type -> show modal
+    if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_select') {
+      const key = interaction.values[0];
       const type = TICKET_TYPES[key];
       if (!type) return;
 
@@ -146,7 +167,11 @@ client.on('interactionCreate', async (interaction) => {
         )
       );
 
-      return interaction.showModal(modal);
+      await interaction.showModal(modal);
+
+      // Reset the dropdown so the same option can be picked again later
+      interaction.message.edit({ components: interaction.message.components }).catch(() => {});
+      return;
     }
 
     // Modal submit -> create ticket channel
@@ -244,4 +269,4 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(DISCORD_TOKEN);
+client.login(MY_BOT_TOKEN);
