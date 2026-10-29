@@ -60,6 +60,7 @@ const LONG = TextInputStyle.Paragraph;
 const TICKET_TYPES = {
   building: {
     label: 'Building Services',
+    description: 'Request a custom build from our builders',
     emoji: '🏗️',
     prefix: 'build',
     color: 0x3498db,
@@ -71,6 +72,7 @@ const TICKET_TYPES = {
   },
   support: {
     label: 'Support / Giveaway Claims',
+    description: 'Get help with an issue or claim a giveaway',
     emoji: '🎁',
     prefix: 'support',
     color: 0x2ecc71,
@@ -82,6 +84,7 @@ const TICKET_TYPES = {
   },
   skeleton: {
     label: 'Skeleton Sell/Buys',
+    description: 'Buy or sell skeletons safely with staff',
     emoji: '💀',
     prefix: 'skeleton',
     color: 0xe67e22,
@@ -89,6 +92,18 @@ const TICKET_TYPES = {
       { id: 'ign', label: 'What is your IGN?', style: SHORT },
       { id: 'amount', label: 'How many skellys would you like?', style: SHORT },
       { id: 'action', label: 'Are you selling / buying?', style: SHORT },
+    ],
+    notice: null,
+  },
+  staffapp: {
+    label: 'Staff Application',
+    description: 'Apply to join the staff team',
+    emoji: '📝',
+    prefix: 'staffapp',
+    color: 0x9b59b6,
+    fields: [
+      { id: 'ign', label: 'What is your IGN?', style: SHORT },
+      { id: 'role', label: 'What role are you applying for?', style: SHORT },
     ],
     notice: null,
   },
@@ -245,23 +260,27 @@ async function handleCommand(interaction) {
 
   // /ticketpanel
   if (name === 'ticketpanel') {
+    const divider = '▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬';
     const embed = new EmbedBuilder()
-      .setTitle('🎫 Open a Ticket')
+      .setTitle(`${interaction.guild.name} Tickets`)
       .setDescription(
-        'Use the dropdown below to open a ticket.\n\n' +
+        '🎫 **Select a ticket category**\n\n' +
           Object.values(TICKET_TYPES)
-            .map((t) => `${t.emoji} **${t.label}**`)
-            .join('\n')
+            .map((t) => `${t.emoji} **${t.label}**\n${t.description}`)
+            .join(`\n${divider}\n`) +
+          `\n${divider}`
       )
-      .setColor(0x5865f2);
+      .setColor(0x57f287)
+      .setFooter({ text: 'Choose a category from the menu below to open a ticket' });
 
     const row = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId('ticket_select')
-        .setPlaceholder('Select a ticket type...')
+        .setPlaceholder('Select your ticket category')
         .addOptions(
           Object.entries(TICKET_TYPES).map(([key, t]) => ({
             label: t.label,
+            description: t.description,
             value: key,
             emoji: t.emoji,
           }))
