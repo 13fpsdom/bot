@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   Client,
+  AttachmentBuilder,
   GatewayIntentBits,
   ActionRowBuilder,
   ButtonBuilder,
@@ -18,7 +19,14 @@ const {
   MessageFlags,
 } = require('discord.js');
 
-const { MY_BOT_TOKEN, GUILD_ID, STAFF_ROLE_ID, TICKET_CATEGORY_ID, LOG_CHANNEL_ID } = process.env;
+const {
+  MY_BOT_TOKEN,
+  GUILD_ID,
+  STAFF_ROLE_ID,
+  TICKET_CATEGORY_ID,
+  LOG_CHANNEL_ID,
+  TRANSCRIPT_CHANNEL_ID,
+} = process.env;
 
 if (!MY_BOT_TOKEN) {
   console.error("Missing MY_BOT_TOKEN environment variable. Set it in your host's Environment settings or in your .env file.");
@@ -29,7 +37,11 @@ if (!GUILD_ID) {
   process.exit(1);
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// MessageContent is needed so transcripts can read what people wrote.
+// It must also be switched on in the Discord Developer Portal (Bot tab -> Privileged Gateway Intents).
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+});
 
 // ---------------------------------------------------------------
 // Simple JSON storage (blacklist)
@@ -63,6 +75,7 @@ const TICKET_TYPES = {
     description: 'Request a custom build from our builders',
     emoji: '🏗️',
     prefix: 'build',
+    category: process.env.BUILD_CATEGORY_ID,
     color: 0x3498db,
     fields: [
       { id: 'ign', label: 'What is your IGN?', style: SHORT },
@@ -75,6 +88,7 @@ const TICKET_TYPES = {
     description: 'Get help with an issue or claim a giveaway',
     emoji: '🎁',
     prefix: 'support',
+    category: process.env.SUPPORT_CATEGORY_ID,
     color: 0x2ecc71,
     fields: [
       { id: 'ign', label: 'What is your IGN?', style: SHORT },
@@ -87,6 +101,7 @@ const TICKET_TYPES = {
     description: 'Buy or sell skeletons safely with staff',
     emoji: '💀',
     prefix: 'skeleton',
+    category: process.env.SPAWNER_CATEGORY_ID,
     color: 0xe67e22,
     fields: [
       { id: 'ign', label: 'What is your IGN?', style: SHORT },
@@ -100,6 +115,7 @@ const TICKET_TYPES = {
     description: 'Apply to join the staff team',
     emoji: '📝',
     prefix: 'staffapp',
+    category: process.env.STAFFAPP_CATEGORY_ID,
     color: 0x9b59b6,
     fields: [
       { id: 'ign', label: 'What is your IGN?', style: SHORT },
@@ -114,11 +130,16 @@ const TICKET_TYPES = {
 // ---------------------------------------------------------------
 const eph = (content) => ({ content, flags: MessageFlags.Ephemeral });
 
-const isStaff = (member) =>
-  Boolean(
-    (STAFF_ROLE_ID && member.roles.cache.has(STAFF_ROLE_ID)) ||
-      member.permissions.has(PermissionFlagsBits.ManageChannels)
-  );
+// STAFF_ROLE_ID can hold several role IDs separated by commas, e.g. 111,222,333
+// Anyone with ANY of these roles can use every command and close any ticket.
+const STAFF_ROLES = (STAFF_ROLE_ID || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const isManager = (member) => member.permissions.has(PermissionFlagsBits.ManageChannels);
+
+const isStaff = (member) => STAFF_ROLES.some((id) => member.roles.cache.has(id)) || isManager(member);
 
 // Ticket info is stored in the channel topic:
 //   ticket-owner:<userId>            or   ticket-owner:<userId>|claimed:<staffId>
@@ -130,26 +151,120 @@ function setTicketTopic(channel, ownerId, claimedBy) {
   return channel.setTopic(`ticket-owner:${ownerId}${claimedBy ? `|claimed:${claimedBy}` : ''}`);
 }
 
-async function sendLog(guild, embed) {
-  if (!LOG_CHANNEL_ID) return;
+// Sends a message to a channel by ID. Returns true on success.
+async function sendTo(guild, channelId, payload) {
+  if (!channelId) return false;
   try {
-    const ch = await guild.channels.fetch(LOG_CHANNEL_ID);
-    if (ch) await ch.send({ embeds: [embed] });
+    const ch = await guild.channels.fetch(channelId);
+    if (!ch) return false;
+    await ch.send(payload);
+    return true;
   } catch (err) {
-    console.error('Could not send to log channel:', err.message);
+    console.error(`Could not send to channel ${channelId}:`, err.message);
+    return false;
   }
+}
+
+const sendLog = (guild, embed) => sendTo(guild, LOG_CHANNEL_ID, { embeds: [embed] });
+
+// ---------------------------------------------------------------
+// Transcripts
+// ---------------------------------------------------------------
+async function fetchAllMessages(channel, limit = 2000) {
+  const all = [];
+  let before;
+  while (all.length < limit) {
+    const batch = await channel.messages.fetch({ limit: 100, before });
+    if (!batch.size) break;
+    all.push(...batch.values());
+    before = batch.last().id; // oldest message of this batch
+  }
+  return all.reverse(); // oldest first
+}
+
+const esc = (s = '') =>
+  String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+function buildTranscriptHtml(channel, messages, { opener, claimedBy, closer, reason }) {
+  const rows = messages
+    .map((m) => {
+      const time = m.createdAt.toISOString().replace('T', ' ').slice(0, 19);
+      const parts = [];
+      if (m.cleanContent) parts.push(`<div>${esc(m.cleanContent).replace(/\n/g, '<br>')}</div>`);
+      for (const e of m.embeds) {
+        const lines = [
+          e.title && `<b>${esc(e.title)}</b>`,
+          e.description && esc(e.description).replace(/\n/g, '<br>'),
+          ...(e.fields || []).map((f) => `<b>${esc(f.name)}:</b> ${esc(f.value)}`),
+        ].filter(Boolean);
+        if (lines.length) parts.push(`<div class="embed">${lines.join('<br>')}</div>`);
+      }
+      for (const a of m.attachments.values()) {
+        parts.push(`<div>📎 <a href="${esc(a.url)}">${esc(a.name)}</a></div>`);
+      }
+      return (
+        `<div class="msg"><img class="av" src="${esc(m.author.displayAvatarURL({ size: 64 }))}">` +
+        `<div><span class="name">${esc(m.author.tag)}</span> <span class="time">${time} UTC</span>${parts.join('')}</div></div>`
+      );
+    })
+    .join('\n');
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Transcript - ${esc(channel.name)}</title>
+<style>
+body{background:#313338;color:#dbdee1;font-family:Arial,Helvetica,sans-serif;margin:0;padding:24px}
+.head{border-bottom:1px solid #4e5058;margin-bottom:16px;padding-bottom:12px}
+.head h1{margin:0 0 8px;font-size:20px;color:#fff}
+.head div{font-size:13px;color:#b5bac1;margin:2px 0}
+.msg{display:flex;gap:12px;margin:14px 0}
+.av{width:40px;height:40px;border-radius:50%;flex:none}
+.name{font-weight:bold;color:#fff}
+.time{font-size:12px;color:#949ba4;margin-left:6px}
+.embed{border-left:4px solid #57f287;background:#2b2d31;padding:8px 12px;margin-top:4px;border-radius:4px}
+a{color:#00a8fc}
+</style></head><body>
+<div class="head"><h1>#${esc(channel.name)}</h1>
+<div>Opened by: ${esc(opener)}</div>
+<div>Claimed by: ${esc(claimedBy)}</div>
+<div>Closed by: ${esc(closer)}</div>
+<div>Reason: ${esc(reason)}</div>
+<div>Messages: ${messages.length}</div></div>
+${rows}
+</body></html>`;
 }
 
 async function closeTicket(interaction, reason) {
   const channel = interaction.channel;
+  const guild = interaction.guild;
   const info = parseTicket(channel);
   const finalReason = reason || 'No reason provided';
+  const transcriptChannelId = TRANSCRIPT_CHANNEL_ID || LOG_CHANNEL_ID;
 
-  await interaction.reply(`🔒 Ticket closed by ${interaction.user}. Deleting in 5 seconds...\n**Reason:** ${finalReason}`);
+  await interaction.reply(`🔒 Closing ticket and saving the transcript...\n**Reason:** ${finalReason}`);
 
-  await sendLog(
-    interaction.guild,
-    new EmbedBuilder()
+  // Build the transcript
+  let html = null;
+  try {
+    const [messages, openerUser, claimerUser] = await Promise.all([
+      fetchAllMessages(channel),
+      info ? client.users.fetch(info.ownerId).catch(() => null) : null,
+      info?.claimedBy ? client.users.fetch(info.claimedBy).catch(() => null) : null,
+    ]);
+    html = buildTranscriptHtml(channel, messages, {
+      opener: openerUser ? `${openerUser.tag} (${openerUser.id})` : 'Unknown',
+      claimedBy: claimerUser ? `${claimerUser.tag} (${claimerUser.id})` : 'Nobody',
+      closer: `${interaction.user.tag} (${interaction.user.id})`,
+      reason: finalReason,
+    });
+  } catch (err) {
+    console.error('Transcript failed:', err);
+  }
+  const makeFile = () => new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: `transcript-${channel.name}.html` });
+
+  // Post to the transcript channel. If one is configured but we can't save to it,
+  // keep the ticket open so nothing is lost.
+  if (transcriptChannelId) {
+    const closeEmbed = new EmbedBuilder()
       .setTitle('🔒 Ticket Closed')
       .setColor(0xe74c3c)
       .addFields(
@@ -159,16 +274,35 @@ async function closeTicket(interaction, reason) {
         { name: 'Closed by', value: `${interaction.user}`, inline: true },
         { name: 'Reason', value: finalReason }
       )
-      .setTimestamp()
-  );
+      .setTimestamp();
 
-  if (info) {
+    const ok = html
+      ? await sendTo(guild, transcriptChannelId, { embeds: [closeEmbed], files: [makeFile()] })
+      : false;
+
+    if (!ok) {
+      return interaction.followUp(
+        eph(
+          "⚠️ I couldn't save the transcript, so the ticket was **not** deleted. Check that the bot can view, send messages and attach files in the transcript channel, and that Message Content Intent is enabled. Then try /close again."
+        )
+      );
+    }
+  }
+
+  // DM the opener a copy
+  if (info && html) {
     client.users
       .fetch(info.ownerId)
-      .then((u) => u.send(`Your ticket **#${channel.name}** in **${interaction.guild.name}** was closed.\nReason: ${finalReason}`))
+      .then((u) =>
+        u.send({
+          content: `Your ticket **#${channel.name}** in **${guild.name}** was closed.\n**Reason:** ${finalReason}`,
+          files: [makeFile()],
+        })
+      )
       .catch(() => {});
   }
 
+  await interaction.editReply(`🔒 Ticket closed by ${interaction.user}. Deleting in 5 seconds...\n**Reason:** ${finalReason}`);
   setTimeout(() => channel.delete(`Closed by ${interaction.user.tag}`).catch(console.error), 5000);
 }
 
@@ -211,6 +345,11 @@ const commands = [
 
   new SlashCommandBuilder().setName('claim').setDescription('Claim this ticket'),
   new SlashCommandBuilder().setName('unclaim').setDescription('Release your claim on this ticket'),
+
+  new SlashCommandBuilder()
+    .setName('transfer')
+    .setDescription('Transfer this ticket to another staff member')
+    .addUserOption((o) => o.setName('user').setDescription('Staff member to hand the ticket to').setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('add')
@@ -350,11 +489,19 @@ async function handleCommand(interaction) {
 
   if (name === 'unclaim') {
     if (!info.claimedBy) return interaction.reply(eph('This ticket is not claimed.'));
-    if (info.claimedBy !== interaction.user.id && !interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply(eph(`Only <@${info.claimedBy}> (or someone with Manage Channels) can unclaim this ticket.`));
+    if (info.claimedBy !== interaction.user.id && !isManager(interaction.member)) {
+      return interaction.reply(eph(`Only <@${info.claimedBy}> (or a manager) can unclaim this ticket.`));
     }
     await setTicketTopic(interaction.channel, info.ownerId, null);
     return interaction.reply(`🔓 ${interaction.user} has unclaimed this ticket.`);
+  }
+
+  if (name === 'transfer') {
+    const user = interaction.options.getUser('user');
+    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+    if (!member || !isStaff(member)) return interaction.reply(eph('That user is not a staff member.'));
+    await setTicketTopic(interaction.channel, info.ownerId, user.id);
+    return interaction.reply(`🔁 ${interaction.user} transferred this ticket to ${user}.`);
   }
 
   if (name === 'rename') {
@@ -460,12 +607,13 @@ client.on('interactionCreate', async (interaction) => {
         { id: interaction.user.id, allow },
         { id: client.user.id, allow: [...allow, PermissionFlagsBits.ManageChannels] },
       ];
-      if (STAFF_ROLE_ID) overwrites.push({ id: STAFF_ROLE_ID, allow });
+      for (const roleId of STAFF_ROLES) overwrites.push({ id: roleId, allow });
 
       const channel = await guild.channels.create({
         name: `${type.prefix}-${safeName}`,
         type: ChannelType.GuildText,
-        parent: TICKET_CATEGORY_ID || null,
+        // Each ticket type has its own category; falls back to TICKET_CATEGORY_ID if not set
+        parent: (type.category || TICKET_CATEGORY_ID || '').trim() || null,
         topic: `ticket-owner:${interaction.user.id}`,
         permissionOverwrites: overwrites,
       });
@@ -490,7 +638,8 @@ client.on('interactionCreate', async (interaction) => {
       );
 
       await channel.send({
-        content: `${interaction.user}${STAFF_ROLE_ID ? ` <@&${STAFF_ROLE_ID}>` : ''}`,
+        content: `${interaction.user} ${STAFF_ROLES.map((id) => `<@&${id}>`).join(' ')}`.trim(),
+        allowedMentions: { users: [interaction.user.id], roles: STAFF_ROLES },
         embeds: [embed],
         components: [buttons],
       });
