@@ -244,12 +244,16 @@ async function closeTicket(interaction, reason) {
 
   // Build the transcript
   let html = null;
+  let openerUser = null;
+  let messageCount = 0;
   try {
-    const [messages, openerUser, claimerUser] = await Promise.all([
+    const [messages, opener, claimerUser] = await Promise.all([
       fetchAllMessages(channel),
       info ? client.users.fetch(info.ownerId).catch(() => null) : null,
       info?.claimedBy ? client.users.fetch(info.claimedBy).catch(() => null) : null,
     ]);
+    openerUser = opener;
+    messageCount = messages.length;
     html = buildTranscriptHtml(channel, messages, {
       opener: openerUser ? `${openerUser.tag} (${openerUser.id})` : 'Unknown',
       claimedBy: claimerUser ? `${claimerUser.tag} (${claimerUser.id})` : 'Nobody',
@@ -265,15 +269,38 @@ async function closeTicket(interaction, reason) {
   // keep the ticket open so nothing is lost.
   if (transcriptChannelId) {
     const closeEmbed = new EmbedBuilder()
-      .setTitle('🔒 Ticket Closed')
+      .setTitle('Ticket Closed')
+      .setDescription(`${interaction.user} closed a ticket.`)
       .setColor(0xe74c3c)
       .addFields(
-        { name: 'Ticket', value: `#${channel.name}`, inline: true },
-        { name: 'Opened by', value: info ? `<@${info.ownerId}>` : 'Unknown', inline: true },
-        { name: 'Claimed by', value: info?.claimedBy ? `<@${info.claimedBy}>` : 'Nobody', inline: true },
-        { name: 'Closed by', value: `${interaction.user}`, inline: true },
-        { name: 'Reason', value: finalReason }
+        {
+          name: 'Close Information',
+          value:
+            `> **Ticket Name:** ${channel.name}\n` +
+            `> **Ticket ID:** ${channel.id}\n` +
+            `> **Reason:** ${finalReason}\n` +
+            `> **Messages:** ${messageCount}`,
+        },
+        {
+          name: 'Creator Information',
+          value:
+            `> **Creator:** ${info ? `<@${info.ownerId}>` : 'Unknown'}\n` +
+            `> **Creator Username:** ${openerUser ? `@${openerUser.username}` : 'Unknown'}\n` +
+            `> **Creator ID:** ${info ? info.ownerId : 'Unknown'}`,
+        },
+        {
+          name: 'Executor Information',
+          value:
+            `> **Executor:** ${interaction.user}\n` +
+            `> **Executor Username:** @${interaction.user.username}\n` +
+            `> **Executor ID:** ${interaction.user.id}`,
+        },
+        {
+          name: 'Claimed By',
+          value: info?.claimedBy ? `<@${info.claimedBy}>` : 'Nobody',
+        }
       )
+      .setFooter({ text: `${guild.name} Tickets` })
       .setTimestamp();
 
     const ok = html
@@ -684,7 +711,19 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(MY_BOT_TOKEN);
+// Clean up common copy/paste mistakes: spaces, line breaks, quotes, "Bot " prefix, "MY_BOT_TOKEN=" prefix
+const cleanToken = MY_BOT_TOKEN.trim()
+  .replace(/^MY_BOT_TOKEN\s*=\s*/i, '')
+  .replace(/^["']|["']$/g, '')
+  .replace(/^Bot\s+/i, '')
+  .trim();
+
+// Diagnostic (does NOT print the token): a real bot token is ~70 chars with exactly 2 dots
+console.log(
+  `Token check: length=${cleanToken.length}, dots=${(cleanToken.match(/\./g) || []).length} (expected ~70 and 2)`
+);
+
+client.login(cleanToken);
 
 // Keeps Render's Web Service happy by opening a port
 const http = require('http');
